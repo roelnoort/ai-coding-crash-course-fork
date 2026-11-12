@@ -7,11 +7,11 @@ import {
 } from "~/components/ui/chart";
 import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
 import { NO_DATA, formatPercent } from "~/lib/analytics-format";
-import {
-  FINISHED_SHARE,
-  type LessonDropOff,
-  type QuizPerformance,
-  type VideoEngagement,
+import { FINISHED_SHARE } from "~/lib/analytics-thresholds";
+import type {
+  LessonDropOff,
+  QuizPerformance,
+  VideoEngagement,
 } from "~/services/analyticsService";
 
 // ─── Course Breakdowns ───

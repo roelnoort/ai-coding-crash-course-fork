@@ -12,6 +12,7 @@ import {
 } from "drizzle-orm";
 import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 import { db } from "~/db";
+import { FINISHED_SHARE } from "~/lib/analytics-thresholds";
 import {
   CourseStatus,
   courseRatings,
@@ -437,9 +438,6 @@ export type VideoEngagement = {
   /** 0–1, enrolled students who watched at least 90%. Null with no students. */
   finishedRate: number | null;
 };
-
-/** A student who watched at least this share of a video finished it. */
-export const FINISHED_SHARE = 0.9;
 
 /**
  * Every lesson with a video URL and a duration, in course order. Lessons
