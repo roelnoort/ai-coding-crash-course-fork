@@ -1,6 +1,7 @@
 import {
   and,
   eq,
+  gt,
   gte,
   inArray,
   isNotNull,
@@ -23,6 +24,7 @@ import {
   purchases,
   quizAttempts,
   quizzes,
+  videoWatchEvents,
 } from "~/db/schema";
 
 // ─── Analytics Service ───
@@ -130,6 +132,17 @@ function sumTotals(rows: MetricTotals[]): MetricTotals {
   return total;
 }
 
+/**
+ * Join condition keeping only activity by students enrolled in the course, so
+ * e.g. an instructor trying their own quiz doesn't count.
+ */
+function isEnrolled(userId: SQLiteColumn, courseId: SQLiteColumn | number) {
+  return and(
+    eq(enrollments.userId, userId),
+    eq(enrollments.courseId, courseId)
+  );
+}
+
 // ─── Per-course aggregates ───
 
 function enrollmentStats() {
@@ -179,13 +192,7 @@ function completedLessonStats() {
     .from(lessonProgress)
     .innerJoin(lessons, eq(lessonProgress.lessonId, lessons.id))
     .innerJoin(modules, eq(lessons.moduleId, modules.id))
-    .innerJoin(
-      enrollments,
-      and(
-        eq(enrollments.userId, lessonProgress.userId),
-        eq(enrollments.courseId, modules.courseId)
-      )
-    )
+    .innerJoin(enrollments, isEnrolled(lessonProgress.userId, modules.courseId))
     .where(eq(lessonProgress.status, LessonProgressStatus.Completed))
     .groupBy(modules.courseId)
     .as("completed_lesson_stats");
@@ -206,13 +213,7 @@ function quizScoreStats() {
     .innerJoin(quizzes, eq(quizAttempts.quizId, quizzes.id))
     .innerJoin(lessons, eq(quizzes.lessonId, lessons.id))
     .innerJoin(modules, eq(lessons.moduleId, modules.id))
-    .innerJoin(
-      enrollments,
-      and(
-        eq(enrollments.userId, quizAttempts.userId),
-        eq(enrollments.courseId, modules.courseId)
-      )
-    )
+    .innerJoin(enrollments, isEnrolled(quizAttempts.userId, modules.courseId))
     .groupBy(quizAttempts.userId, quizAttempts.quizId)
     .as("best_attempts");
 
@@ -319,6 +320,184 @@ function monthlyTrends(courseIds: number[], now: Date): MonthlyBucket[] {
   return [...buckets.values()];
 }
 
+// ─── Course breakdowns ───
+
+export type QuizPerformance = {
+  quizId: number;
+  title: string;
+  lessonTitle: string;
+  /** Enrolled students who attempted the quiz. */
+  students: number;
+  /** 0–1, average of each student's best score. Null with no attempts. */
+  averageScore: number | null;
+  /** 0–1, share of best attempts that passed. Null with no attempts. */
+  passRate: number | null;
+};
+
+/** Course order: module position, then lesson position (id breaks ties). */
+const courseOrder = [modules.position, lessons.position, lessons.id] as const;
+
+/** Every quiz in the course, in course order, scored on best attempts. */
+function quizPerformance(courseId: number): QuizPerformance[] {
+  const bestAttempts = db
+    .select({
+      quizId: quizAttempts.quizId,
+      bestScore: sql<number>`max(${quizAttempts.score})`.as("best_score"),
+      // SQLite takes a bare column alongside max() from the row holding the
+      // max, so this is the best attempt's pass/fail as it was recorded.
+      bestPassed: sql<number>`${quizAttempts.passed}`.as("best_passed"),
+    })
+    .from(quizAttempts)
+    .innerJoin(enrollments, isEnrolled(quizAttempts.userId, courseId))
+    .groupBy(quizAttempts.userId, quizAttempts.quizId)
+    .as("best_attempts");
+
+  const rows = db
+    .select({
+      quizId: quizzes.id,
+      title: quizzes.title,
+      lessonTitle: lessons.title,
+      students: sql<number>`count(${bestAttempts.quizId})`,
+      scoreSum: sql<number>`coalesce(sum(${bestAttempts.bestScore}), 0)`,
+      passedCount: sql<number>`coalesce(sum(${bestAttempts.bestPassed}), 0)`,
+    })
+    .from(quizzes)
+    .innerJoin(lessons, eq(quizzes.lessonId, lessons.id))
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .leftJoin(bestAttempts, eq(bestAttempts.quizId, quizzes.id))
+    .where(eq(modules.courseId, courseId))
+    .groupBy(quizzes.id)
+    .orderBy(...courseOrder, quizzes.id)
+    .all();
+
+  return rows.map((row) => ({
+    quizId: row.quizId,
+    title: row.title,
+    lessonTitle: row.lessonTitle,
+    students: row.students,
+    averageScore: ratio(row.scoreSum, row.students),
+    passRate: ratio(row.passedCount, row.students),
+  }));
+}
+
+export type LessonDropOff = {
+  lessonId: number;
+  title: string;
+  moduleTitle: string;
+  /** 0–1, enrolled students who completed the lesson. Null with no students. */
+  completionRate: number | null;
+};
+
+/** Every lesson in the course, in course order, with its completion share. */
+function lessonDropOff(courseId: number, enrolled: number): LessonDropOff[] {
+  const completions = db
+    .select({
+      lessonId: lessonProgress.lessonId,
+      completed: sql<number>`count(*)`.as("completed"),
+    })
+    .from(lessonProgress)
+    .innerJoin(enrollments, isEnrolled(lessonProgress.userId, courseId))
+    .where(eq(lessonProgress.status, LessonProgressStatus.Completed))
+    .groupBy(lessonProgress.lessonId)
+    .as("lesson_completions");
+
+  const rows = db
+    .select({
+      lessonId: lessons.id,
+      title: lessons.title,
+      moduleTitle: modules.title,
+      completed: sql<number>`coalesce(${completions.completed}, 0)`,
+    })
+    .from(lessons)
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .leftJoin(completions, eq(completions.lessonId, lessons.id))
+    .where(eq(modules.courseId, courseId))
+    .orderBy(...courseOrder)
+    .all();
+
+  return rows.map((row) => ({
+    lessonId: row.lessonId,
+    title: row.title,
+    moduleTitle: row.moduleTitle,
+    completionRate: ratio(row.completed, enrolled),
+  }));
+}
+
+export type VideoEngagement = {
+  lessonId: number;
+  title: string;
+  moduleTitle: string;
+  /** 0–1, enrolled students with at least one watch event. Null with no students. */
+  startedRate: number | null;
+  /**
+   * 0–1, furthest position ÷ duration (capped at 1), averaged over students
+   * who started. Null when nobody started.
+   */
+  averageShareWatched: number | null;
+  /** 0–1, enrolled students who watched at least 90%. Null with no students. */
+  finishedRate: number | null;
+};
+
+/** A student who watched at least this share of a video finished it. */
+export const FINISHED_SHARE = 0.9;
+
+/**
+ * Every lesson with a video URL and a duration, in course order. Lessons
+ * missing either are skipped — there's nothing to measure a share against.
+ */
+function videoEngagement(
+  courseId: number,
+  enrolled: number
+): VideoEngagement[] {
+  // Each enrolled student's share of each video, capped at 100%.
+  const shares = db
+    .select({
+      lessonId: videoWatchEvents.lessonId,
+      share:
+        sql<number>`min(1.0, max(${videoWatchEvents.positionSeconds}) / (${lessons.durationMinutes} * 60.0))`.as(
+          "share"
+        ),
+    })
+    .from(videoWatchEvents)
+    .innerJoin(lessons, eq(videoWatchEvents.lessonId, lessons.id))
+    .innerJoin(enrollments, isEnrolled(videoWatchEvents.userId, courseId))
+    .groupBy(videoWatchEvents.userId, videoWatchEvents.lessonId)
+    .as("video_shares");
+
+  const rows = db
+    .select({
+      lessonId: lessons.id,
+      title: lessons.title,
+      moduleTitle: modules.title,
+      started: sql<number>`count(${shares.lessonId})`,
+      shareSum: sql<number>`coalesce(sum(${shares.share}), 0)`,
+      finished: sql<number>`coalesce(sum(${shares.share} >= ${FINISHED_SHARE}), 0)`,
+    })
+    .from(lessons)
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .leftJoin(shares, eq(shares.lessonId, lessons.id))
+    .where(
+      and(
+        eq(modules.courseId, courseId),
+        isNotNull(lessons.videoUrl),
+        ne(lessons.videoUrl, ""),
+        gt(lessons.durationMinutes, 0)
+      )
+    )
+    .groupBy(lessons.id)
+    .orderBy(...courseOrder)
+    .all();
+
+  return rows.map((row) => ({
+    lessonId: row.lessonId,
+    title: row.title,
+    moduleTitle: row.moduleTitle,
+    startedRate: ratio(row.started, enrolled),
+    averageShareWatched: ratio(row.shareSum, row.started),
+    finishedRate: ratio(row.finished, enrolled),
+  }));
+}
+
 // ─── Per-course metric rows ───
 
 type CourseTotalsRow = MetricTotals & {
@@ -412,6 +591,12 @@ export type CourseAnalytics = {
   headline: OverviewMetrics;
   /** The 12 calendar months up to and including the current one, oldest first. */
   trends: MonthlyBucket[];
+  /** Every quiz in the course, in course order. */
+  quizzes: QuizPerformance[];
+  /** Every lesson in the course, in course order. */
+  lessonDropOff: LessonDropOff[];
+  /** Lessons with a video and a duration, in course order. */
+  videoEngagement: VideoEngagement[];
 };
 
 /**
@@ -423,10 +608,14 @@ export function getCourseAnalytics(
   now: Date
 ): CourseAnalytics {
   const [row] = courseTotals(() => eq(courses.id, courseId));
+  const enrolled = row?.students ?? 0;
 
   return {
     // An unknown course has no rows — report it as empty.
     headline: toMetrics(row ?? sumTotals([])),
     trends: monthlyTrends([courseId], now),
+    quizzes: quizPerformance(courseId),
+    lessonDropOff: lessonDropOff(courseId, enrolled),
+    videoEngagement: videoEngagement(courseId, enrolled),
   };
 }

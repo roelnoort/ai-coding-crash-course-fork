@@ -8,13 +8,19 @@ import {
   formatRevenue,
 } from "~/lib/analytics-format";
 import { TrendCharts } from "~/components/analytics/trend-charts";
+import {
+  LessonDropOffChart,
+  QuizPerformanceTable,
+  VideoEngagementTable,
+} from "~/components/analytics/course-breakdowns";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent } from "~/components/ui/card";
 import { Skeleton } from "~/components/ui/skeleton";
 import { AlertTriangle, Users } from "lucide-react";
 
 // ─── Course Analytics ───
-// Headline numbers and monthly trends for one course. Only the instructor who
+// Headline numbers, monthly trends and learning breakdowns (quizzes, lesson
+// drop-off, video engagement) for one course. Only the instructor who
 // owns the course may see it — admins get 403 (analytics is out of scope for
 // them).
 
@@ -57,7 +63,8 @@ function Stat({ label, value }: { label: string; value: string }) {
 }
 
 export default function CourseAnalytics({ loaderData }: Route.ComponentProps) {
-  const { course, headline, trends } = loaderData;
+  const { course, headline, trends, quizzes, lessonDropOff, videoEngagement } =
+    loaderData;
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -107,15 +114,27 @@ export default function CourseAnalytics({ loaderData }: Route.ComponentProps) {
             <Users className="mb-4 size-12 text-muted-foreground/50" />
             <h2 className="text-lg font-medium">No students yet</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              Trends will appear here once students enroll in this course.
+              Trends and breakdowns will appear here once students enroll in
+              this course.
             </p>
           </CardContent>
         </Card>
       ) : (
-        <section>
-          <h2 className="mb-4 text-xl font-semibold">Last 12 months</h2>
-          <TrendCharts trends={trends} />
-        </section>
+        <>
+          <section className="mb-8">
+            <h2 className="mb-4 text-xl font-semibold">Last 12 months</h2>
+            <TrendCharts trends={trends} />
+          </section>
+
+          <section>
+            <h2 className="mb-4 text-xl font-semibold">Learning</h2>
+            <div className="grid gap-6">
+              <QuizPerformanceTable quizzes={quizzes} />
+              <LessonDropOffChart lessons={lessonDropOff} />
+              <VideoEngagementTable videos={videoEngagement} />
+            </div>
+          </section>
+        </>
       )}
     </div>
   );

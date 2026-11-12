@@ -94,6 +94,32 @@ function completeLesson(userId: number, lessonId: number) {
     .run();
 }
 
+function createVideoLesson(
+  moduleId: number,
+  position: number,
+  video: { videoUrl?: string | null; durationMinutes?: number | null } = {}
+) {
+  return testDb
+    .insert(schema.lessons)
+    .values({
+      moduleId,
+      title: `Video ${position}`,
+      position,
+      videoUrl: "https://example.com/video.mp4",
+      durationMinutes: 10,
+      ...video,
+    })
+    .returning()
+    .get();
+}
+
+function watch(userId: number, lessonId: number, positionSeconds: number) {
+  testDb
+    .insert(schema.videoWatchEvents)
+    .values({ userId, lessonId, eventType: "progress", positionSeconds })
+    .run();
+}
+
 function createQuiz(lessonId: number) {
   return testDb
     .insert(schema.quizzes)
@@ -102,10 +128,15 @@ function createQuiz(lessonId: number) {
     .get();
 }
 
-function attemptQuiz(userId: number, quizId: number, score: number) {
+function attemptQuiz(
+  userId: number,
+  quizId: number,
+  score: number,
+  passed = score >= 0.7
+) {
   testDb
     .insert(schema.quizAttempts)
-    .values({ userId, quizId, score, passed: score >= 0.7 })
+    .values({ userId, quizId, score, passed })
     .run();
 }
 
@@ -636,6 +667,200 @@ describe("getCourseAnalytics", () => {
       revenueCents: 0,
       enrollments: 0,
       completions: 1,
+    });
+  });
+});
+
+describe("getCourseAnalytics breakdowns", () => {
+  beforeEach(() => {
+    testDb = createTestDb();
+    base = seedBaseData(testDb);
+  });
+
+  describe("quiz performance", () => {
+    it("uses each student's best attempt, not the first or the last", () => {
+      const [lesson] = createLessons(createModule(base.course.id).id, 1);
+      const quiz = createQuiz(lesson.id);
+      const other = createStudent();
+      enroll(base.user.id, base.course.id);
+      enroll(other.id, base.course.id);
+      attemptQuiz(base.user.id, quiz.id, 0.4);
+      attemptQuiz(base.user.id, quiz.id, 0.8);
+      attemptQuiz(base.user.id, quiz.id, 0.6);
+      attemptQuiz(other.id, quiz.id, 0.6);
+
+      const { quizzes } = getCourseAnalytics(base.course.id, NOW);
+
+      expect(quizzes).toHaveLength(1);
+      expect(quizzes[0].quizId).toBe(quiz.id);
+      expect(quizzes[0].averageScore).toBeCloseTo(0.7);
+    });
+
+    it("bases the pass rate on best attempts", () => {
+      const [lesson] = createLessons(createModule(base.course.id).id, 1);
+      const quiz = createQuiz(lesson.id); // passes at 0.7
+      const retried = createStudent();
+      const failed = createStudent();
+      for (const student of [base.user, retried, failed]) {
+        enroll(student.id, base.course.id);
+      }
+      attemptQuiz(base.user.id, quiz.id, 0.9);
+      // Passed, then failed a later retry — the best attempt still passed.
+      attemptQuiz(retried.id, quiz.id, 0.75);
+      attemptQuiz(retried.id, quiz.id, 0.3);
+      attemptQuiz(failed.id, quiz.id, 0.5);
+      attemptQuiz(failed.id, quiz.id, 0.6);
+
+      const [stats] = getCourseAnalytics(base.course.id, NOW).quizzes;
+
+      expect(stats.students).toBe(3);
+      expect(stats.passRate).toBeCloseTo(2 / 3);
+    });
+
+    it("takes pass or fail from the best attempt as it was recorded", () => {
+      const [lesson] = createLessons(createModule(base.course.id).id, 1);
+      const quiz = createQuiz(lesson.id); // passingScore 0.7
+      enroll(base.user.id, base.course.id);
+      // Scored at the passing score, but recorded as a fail.
+      attemptQuiz(base.user.id, quiz.id, 0.7, false);
+
+      const [stats] = getCourseAnalytics(base.course.id, NOW).quizzes;
+
+      expect(stats.passRate).toBe(0);
+    });
+
+    it("lists quizzes nobody has attempted, with no-data averages", () => {
+      const lessons = createLessons(createModule(base.course.id).id, 2);
+      const attempted = createQuiz(lessons[0].id);
+      const untouched = createQuiz(lessons[1].id);
+      enroll(base.user.id, base.course.id);
+      attemptQuiz(base.user.id, attempted.id, 1);
+
+      const { quizzes } = getCourseAnalytics(base.course.id, NOW);
+
+      expect(quizzes.map((q) => q.quizId)).toEqual([
+        attempted.id,
+        untouched.id,
+      ]);
+      expect(quizzes[1]).toMatchObject({
+        students: 0,
+        averageScore: null,
+        passRate: null,
+      });
+    });
+  });
+
+  describe("lesson drop-off", () => {
+    it("reports the share of enrolled students completing each lesson, in course order", () => {
+      // Module 2 is created first so insertion order differs from course order.
+      const second = createModule(base.course.id, 2);
+      const first = createModule(base.course.id, 1);
+      const [m2l1] = createLessons(second.id, 1);
+      const [m1l1, m1l2] = createLessons(first.id, 2);
+      const students = [
+        base.user,
+        createStudent(),
+        createStudent(),
+        createStudent(),
+      ];
+      for (const student of students) enroll(student.id, base.course.id);
+      for (const student of students) completeLesson(student.id, m1l1.id);
+      completeLesson(students[0].id, m1l2.id);
+      completeLesson(students[1].id, m1l2.id);
+      completeLesson(students[0].id, m2l1.id);
+      // A non-enrolled user's progress doesn't count.
+      completeLesson(base.instructor.id, m2l1.id);
+
+      const { lessonDropOff } = getCourseAnalytics(base.course.id, NOW);
+
+      expect(lessonDropOff.map((l) => [l.lessonId, l.completionRate])).toEqual([
+        [m1l1.id, 1],
+        [m1l2.id, 0.5],
+        [m2l1.id, 0.25],
+      ]);
+    });
+
+    it("reports no-data completion when nobody is enrolled", () => {
+      const [lesson] = createLessons(createModule(base.course.id).id, 1);
+
+      const { lessonDropOff } = getCourseAnalytics(base.course.id, NOW);
+
+      expect(lessonDropOff).toEqual([
+        expect.objectContaining({ lessonId: lesson.id, completionRate: null }),
+      ]);
+    });
+  });
+
+  describe("video engagement", () => {
+    it("reports started share, average share watched over starters, and finished share", () => {
+      const lesson = createVideoLesson(createModule(base.course.id).id, 1); // 600s
+      const [half, full, idle, never] = [
+        base.user,
+        createStudent(),
+        createStudent(),
+        createStudent(),
+      ];
+      for (const s of [half, full, idle, never]) enroll(s.id, base.course.id);
+      // The furthest position reached counts, not the latest event.
+      watch(half.id, lesson.id, 300);
+      watch(half.id, lesson.id, 120);
+      watch(full.id, lesson.id, 600);
+      watch(idle.id, lesson.id, 0);
+      // A non-enrolled viewer doesn't count.
+      watch(base.instructor.id, lesson.id, 600);
+
+      const { videoEngagement } = getCourseAnalytics(base.course.id, NOW);
+
+      expect(videoEngagement).toHaveLength(1);
+      expect(videoEngagement[0].lessonId).toBe(lesson.id);
+      expect(videoEngagement[0].startedRate).toBe(0.75);
+      // (0.5 + 1 + 0) / 3 starters — the student who never started is excluded.
+      expect(videoEngagement[0].averageShareWatched).toBeCloseTo(0.5);
+      expect(videoEngagement[0].finishedRate).toBe(0.25);
+    });
+
+    it("counts exactly 90% as finished and just under as not", () => {
+      const lesson = createVideoLesson(createModule(base.course.id).id, 1); // 600s
+      const atThreshold = base.user;
+      const justUnder = createStudent();
+      enroll(atThreshold.id, base.course.id);
+      enroll(justUnder.id, base.course.id);
+      watch(atThreshold.id, lesson.id, 540);
+      watch(justUnder.id, lesson.id, 539);
+
+      const [video] = getCourseAnalytics(base.course.id, NOW).videoEngagement;
+
+      expect(video.finishedRate).toBe(0.5);
+    });
+
+    it("caps a student's share watched at 100%", () => {
+      const lesson = createVideoLesson(createModule(base.course.id).id, 1); // 600s
+      const other = createStudent();
+      enroll(base.user.id, base.course.id);
+      enroll(other.id, base.course.id);
+      watch(base.user.id, lesson.id, 1200);
+      watch(other.id, lesson.id, 300);
+
+      const [video] = getCourseAnalytics(base.course.id, NOW).videoEngagement;
+
+      expect(video.averageShareWatched).toBeCloseTo(0.75);
+    });
+
+    it("skips lessons without a video or without a duration", () => {
+      const moduleId = createModule(base.course.id).id;
+      createVideoLesson(moduleId, 1, { videoUrl: null });
+      createVideoLesson(moduleId, 2, { durationMinutes: null });
+      const video = createVideoLesson(moduleId, 3);
+      enroll(base.user.id, base.course.id);
+
+      const { videoEngagement } = getCourseAnalytics(base.course.id, NOW);
+
+      expect(videoEngagement.map((v) => v.lessonId)).toEqual([video.id]);
+      expect(videoEngagement[0]).toMatchObject({
+        startedRate: 0,
+        averageShareWatched: null,
+        finishedRate: 0,
+      });
     });
   });
 });
