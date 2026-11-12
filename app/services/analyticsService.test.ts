@@ -864,3 +864,153 @@ describe("getCourseAnalytics breakdowns", () => {
     });
   });
 });
+
+function comment(
+  userId: number,
+  lessonId: number,
+  options: { parentId?: number; deleted?: boolean } = {}
+) {
+  return testDb
+    .insert(schema.comments)
+    .values({
+      userId,
+      lessonId,
+      body: "A comment",
+      parentId: options.parentId ?? null,
+      deletedAt: options.deleted ? "2026-06-01T00:00:00Z" : null,
+    })
+    .returning()
+    .get();
+}
+
+function rate(userId: number, courseId: number, rating: number) {
+  testDb
+    .insert(schema.courseRatings)
+    .values({ userId, courseId, rating })
+    .run();
+}
+
+describe("getCourseAnalytics engagement and feedback", () => {
+  beforeEach(() => {
+    testDb = createTestDb();
+    base = seedBaseData(testDb);
+  });
+
+  describe("comments", () => {
+    it("counts non-deleted comments per lesson, in course order, excluding deleted ones", () => {
+      const [first, second] = createLessons(createModule(base.course.id).id, 2);
+      const question = comment(base.user.id, first.id);
+      comment(base.instructor.id, first.id, { parentId: question.id });
+      comment(base.user.id, first.id, { deleted: true });
+      comment(base.user.id, second.id, { deleted: true });
+
+      const { lessonComments } = getCourseAnalytics(base.course.id, NOW);
+
+      expect(lessonComments.map((l) => [l.lessonId, l.comments])).toEqual([
+        [first.id, 2],
+        [second.id, 0],
+      ]);
+    });
+  });
+
+  describe("unanswered questions", () => {
+    it("counts live top-level comments, not replies or deleted questions", () => {
+      const [lesson] = createLessons(createModule(base.course.id).id, 1);
+      const other = createStudent();
+      const question = comment(base.user.id, lesson.id);
+      comment(other.id, lesson.id, { parentId: question.id });
+      comment(other.id, lesson.id);
+      comment(other.id, lesson.id, { deleted: true });
+
+      const { unansweredQuestions } = getCourseAnalytics(base.course.id, NOW);
+
+      expect(unansweredQuestions).toBe(2);
+    });
+
+    it("stops counting a question once the instructor replies, but not when only students do", () => {
+      const [lesson] = createLessons(createModule(base.course.id).id, 1);
+      const other = createStudent();
+      const answered = comment(base.user.id, lesson.id);
+      comment(base.instructor.id, lesson.id, { parentId: answered.id });
+      const studentOnly = comment(base.user.id, lesson.id);
+      comment(other.id, lesson.id, { parentId: studentOnly.id });
+
+      const { unansweredQuestions } = getCourseAnalytics(base.course.id, NOW);
+
+      expect(unansweredQuestions).toBe(1);
+    });
+
+    it("matches the instructor questions queue: deleted replies don't answer, admin replies do, staff posts aren't questions", () => {
+      const [lesson] = createLessons(createModule(base.course.id).id, 1);
+      const admin = testDb
+        .insert(schema.users)
+        .values({
+          name: "Admin",
+          email: "admin@example.com",
+          role: schema.UserRole.Admin,
+        })
+        .returning()
+        .get();
+      const retracted = comment(base.user.id, lesson.id);
+      comment(base.instructor.id, lesson.id, {
+        parentId: retracted.id,
+        deleted: true,
+      });
+      const adminAnswered = comment(base.user.id, lesson.id);
+      comment(admin.id, lesson.id, { parentId: adminAnswered.id });
+      comment(base.instructor.id, lesson.id);
+      comment(admin.id, lesson.id);
+
+      const { unansweredQuestions } = getCourseAnalytics(base.course.id, NOW);
+
+      expect(unansweredQuestions).toBe(1);
+    });
+  });
+
+  describe("ratings", () => {
+    it("reports the average, the count and every star level, including zeros", () => {
+      const students = [
+        base.user,
+        createStudent(),
+        createStudent(),
+        createStudent(),
+      ];
+      [5, 5, 4, 1].forEach((stars, i) =>
+        rate(students[i].id, base.course.id, stars)
+      );
+
+      const { ratings } = getCourseAnalytics(base.course.id, NOW);
+
+      expect(ratings).toEqual({
+        average: 3.75,
+        count: 4,
+        byStars: [
+          { stars: 5, count: 2 },
+          { stars: 4, count: 1 },
+          { stars: 3, count: 0 },
+          { stars: 2, count: 0 },
+          { stars: 1, count: 1 },
+        ],
+      });
+    });
+
+    it("reports no average and zero at every star level for a course without ratings", () => {
+      const other = createCourse(base.instructor.id, "other");
+      rate(base.user.id, other.id, 5);
+
+      const { ratings } = getCourseAnalytics(base.course.id, NOW);
+
+      expect(ratings.average).toBeNull();
+      expect(ratings.count).toBe(0);
+      expect(
+        ratings.byStars.map((level) => [level.stars, level.count])
+      ).toEqual([
+        [5, 0],
+        [4, 0],
+        [3, 0],
+        [2, 0],
+        [1, 0],
+      ]);
+    });
+  });
+});

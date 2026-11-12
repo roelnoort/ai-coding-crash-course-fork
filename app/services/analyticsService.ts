@@ -5,6 +5,7 @@ import {
   gte,
   inArray,
   isNotNull,
+  isNull,
   ne,
   or,
   sql,
@@ -12,8 +13,10 @@ import {
 } from "drizzle-orm";
 import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 import { db } from "~/db";
+import { countUnansweredQuestions } from "~/services/commentService";
 import { FINISHED_SHARE } from "~/lib/analytics-thresholds";
 import {
+  comments,
   CourseStatus,
   courseRatings,
   courses,
@@ -496,6 +499,67 @@ function videoEngagement(
   }));
 }
 
+export type LessonComments = {
+  lessonId: number;
+  title: string;
+  moduleTitle: string;
+  /** Non-deleted comments, replies included. */
+  comments: number;
+};
+
+/** Every lesson in the course, in course order, with its comment count. */
+function lessonComments(courseId: number): LessonComments[] {
+  return db
+    .select({
+      lessonId: lessons.id,
+      title: lessons.title,
+      moduleTitle: modules.title,
+      comments: sql<number>`count(${comments.id})`,
+    })
+    .from(lessons)
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .leftJoin(
+      comments,
+      and(eq(comments.lessonId, lessons.id), isNull(comments.deletedAt))
+    )
+    .where(eq(modules.courseId, courseId))
+    .groupBy(lessons.id)
+    .orderBy(...courseOrder)
+    .all();
+}
+
+export type RatingSummary = {
+  /** 1–5 stars, or null when there are no ratings. */
+  average: number | null;
+  count: number;
+  /** Every star level, 5 down to 1, including levels nobody chose. */
+  byStars: { stars: number; count: number }[];
+};
+
+const STAR_LEVELS = [5, 4, 3, 2, 1] as const;
+
+function ratingSummary(courseId: number): RatingSummary {
+  const rows = db
+    .select({ stars: courseRatings.rating, count: sql<number>`count(*)` })
+    .from(courseRatings)
+    .where(eq(courseRatings.courseId, courseId))
+    .groupBy(courseRatings.rating)
+    .all();
+
+  const countByStars = new Map(rows.map((row) => [row.stars, row.count]));
+  const byStars = STAR_LEVELS.map((stars) => ({
+    stars,
+    count: countByStars.get(stars) ?? 0,
+  }));
+  const count = byStars.reduce((sum, level) => sum + level.count, 0);
+  const starSum = byStars.reduce(
+    (sum, level) => sum + level.stars * level.count,
+    0
+  );
+
+  return { average: ratio(starSum, count), count, byStars };
+}
+
 // ─── Per-course metric rows ───
 
 type CourseTotalsRow = MetricTotals & {
@@ -595,6 +659,14 @@ export type CourseAnalytics = {
   lessonDropOff: LessonDropOff[];
   /** Lessons with a video and a duration, in course order. */
   videoEngagement: VideoEngagement[];
+  /** Every lesson in the course, in course order. */
+  lessonComments: LessonComments[];
+  /**
+   * Questions waiting on an answer, as the instructor questions queue counts
+   * them (see commentService).
+   */
+  unansweredQuestions: number;
+  ratings: RatingSummary;
 };
 
 /**
@@ -615,5 +687,8 @@ export function getCourseAnalytics(
     quizzes: quizPerformance(courseId),
     lessonDropOff: lessonDropOff(courseId, enrolled),
     videoEngagement: videoEngagement(courseId, enrolled),
+    lessonComments: lessonComments(courseId),
+    unansweredQuestions: countUnansweredQuestions(courseId),
+    ratings: ratingSummary(courseId),
   };
 }

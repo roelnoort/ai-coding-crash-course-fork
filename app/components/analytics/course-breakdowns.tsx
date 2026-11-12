@@ -1,4 +1,6 @@
+import { Link } from "react-router";
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import { MessageCircleQuestion, Star } from "lucide-react";
 import {
   ChartContainer,
   ChartTooltip,
@@ -6,17 +8,20 @@ import {
   type ChartConfig,
 } from "~/components/ui/chart";
 import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
-import { NO_DATA, formatPercent } from "~/lib/analytics-format";
+import { NO_DATA, formatPercent, formatRating } from "~/lib/analytics-format";
 import { FINISHED_SHARE } from "~/lib/analytics-thresholds";
 import type {
+  LessonComments,
   LessonDropOff,
   QuizPerformance,
+  RatingSummary,
   VideoEngagement,
 } from "~/services/analyticsService";
 
 // ─── Course Breakdowns ───
-// How students move through one course: quiz performance, lesson drop-off and
-// video engagement. No-data values render as "—".
+// How students move through one course — quiz performance, lesson drop-off and
+// video engagement — and what they say about it: comments, unanswered
+// questions and ratings. No-data values render as "—".
 
 function EmptyNote({ children }: { children: React.ReactNode }) {
   return <p className="text-sm text-muted-foreground">{children}</p>;
@@ -219,6 +224,110 @@ export function VideoEngagementTable({
             </tbody>
           </table>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+export function UnansweredQuestionsCard({ count }: { count: number }) {
+  return (
+    <Link to="/instructor/questions" className="block">
+      <Card className="py-4 transition-colors hover:bg-muted/50">
+        <CardContent className="flex items-center gap-4 px-4">
+          <MessageCircleQuestion className="size-8 shrink-0 text-muted-foreground" />
+          <div>
+            <div className="text-2xl font-semibold tabular-nums">{count}</div>
+            <div className="text-sm text-muted-foreground">
+              {count === 1 ? "Question" : "Questions"} without a reply from you
+              — view questions →
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    </Link>
+  );
+}
+
+export function LessonCommentsTable({
+  lessons,
+}: {
+  lessons: LessonComments[];
+}) {
+  return (
+    <Card className="gap-0 pb-0">
+      <CardHeader className="pb-4">
+        <CardTitle className="text-base">Comments per lesson</CardTitle>
+      </CardHeader>
+      <CardContent className="overflow-x-auto p-0">
+        {lessons.length === 0 ? (
+          <div className="px-6 pb-6">
+            <EmptyNote>This course has no lessons.</EmptyNote>
+          </div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="border-y text-muted-foreground">
+              <tr>
+                <Th align="left">Lesson</Th>
+                <Th>Comments</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {lessons.map((lesson) => (
+                <tr key={lesson.lessonId} className="border-b last:border-b-0">
+                  <LessonCell
+                    title={lesson.title}
+                    context={lesson.moduleTitle}
+                  />
+                  <Td>{lesson.comments}</Td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+export function RatingsCard({ ratings }: { ratings: RatingSummary }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Ratings</CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-6 sm:flex-row sm:items-center">
+        <div className="shrink-0 text-center sm:w-32">
+          <div className="text-4xl font-semibold tabular-nums">
+            {formatRating(ratings.average)}
+          </div>
+          <div className="mt-1 text-sm text-muted-foreground">
+            {ratings.count} {ratings.count === 1 ? "rating" : "ratings"}
+          </div>
+        </div>
+        <ul className="flex-1 space-y-2">
+          {ratings.byStars.map((level) => (
+            <li key={level.stars} className="flex items-center gap-3 text-sm">
+              <span className="flex w-10 shrink-0 items-center gap-1 tabular-nums">
+                {level.stars}
+                <Star className="size-3.5 fill-current text-muted-foreground" />
+              </span>
+              <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
+                <div
+                  className="h-full rounded-full bg-chart-1"
+                  style={{
+                    width:
+                      ratings.count === 0
+                        ? 0
+                        : `${(level.count / ratings.count) * 100}%`,
+                  }}
+                />
+              </div>
+              <span className="w-8 shrink-0 text-right tabular-nums">
+                {level.count}
+              </span>
+            </li>
+          ))}
+        </ul>
       </CardContent>
     </Card>
   );

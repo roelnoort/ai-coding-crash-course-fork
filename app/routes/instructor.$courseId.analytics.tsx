@@ -9,8 +9,11 @@ import {
 } from "~/lib/analytics-format";
 import { TrendCharts } from "~/components/analytics/trend-charts";
 import {
+  LessonCommentsTable,
   LessonDropOffChart,
   QuizPerformanceTable,
+  RatingsCard,
+  UnansweredQuestionsCard,
   VideoEngagementTable,
 } from "~/components/analytics/course-breakdowns";
 import { Button } from "~/components/ui/button";
@@ -19,8 +22,9 @@ import { Skeleton } from "~/components/ui/skeleton";
 import { AlertTriangle, Users } from "lucide-react";
 
 // ─── Course Analytics ───
-// Headline numbers, monthly trends and learning breakdowns (quizzes, lesson
-// drop-off, video engagement) for one course. Only the instructor who
+// Headline numbers, monthly trends, learning breakdowns (quizzes, lesson
+// drop-off, video engagement) and engagement and feedback (comments,
+// unanswered questions, ratings) for one course. Only the instructor who
 // owns the course may see it — admins get 403 (analytics is out of scope for
 // them).
 
@@ -63,8 +67,17 @@ function Stat({ label, value }: { label: string; value: string }) {
 }
 
 export default function CourseAnalytics({ loaderData }: Route.ComponentProps) {
-  const { course, headline, trends, quizzes, lessonDropOff, videoEngagement } =
-    loaderData;
+  const {
+    course,
+    headline,
+    trends,
+    quizzes,
+    lessonDropOff,
+    videoEngagement,
+    lessonComments,
+    unansweredQuestions,
+    ratings,
+  } = loaderData;
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -126,12 +139,23 @@ export default function CourseAnalytics({ loaderData }: Route.ComponentProps) {
             <TrendCharts trends={trends} />
           </section>
 
-          <section>
+          <section className="mb-8">
             <h2 className="mb-4 text-xl font-semibold">Learning</h2>
             <div className="grid gap-6">
               <QuizPerformanceTable quizzes={quizzes} />
               <LessonDropOffChart lessons={lessonDropOff} />
               <VideoEngagementTable videos={videoEngagement} />
+            </div>
+          </section>
+
+          <section>
+            <h2 className="mb-4 text-xl font-semibold">
+              Engagement &amp; feedback
+            </h2>
+            <div className="grid gap-6">
+              <UnansweredQuestionsCard count={unansweredQuestions} />
+              <RatingsCard ratings={ratings} />
+              <LessonCommentsTable lessons={lessonComments} />
             </div>
           </section>
         </>

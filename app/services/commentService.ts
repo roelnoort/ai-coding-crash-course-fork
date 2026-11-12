@@ -8,6 +8,7 @@ import {
   sql,
   desc,
   asc,
+  type SQL,
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 import { db } from "~/db";
@@ -268,21 +269,20 @@ export type QueuedQuestion = {
   authorAvatarUrl: string | null;
 };
 
+// "Unanswered" is defined once, here, so the queue and the count shown on the
+// course analytics page always agree.
+const author = alias(users, "author");
+const reply = alias(comments, "reply");
+const replyAuthor = alias(users, "reply_author");
+
 /**
- * Questions still waiting on an answer, newest first.
+ * Every question still waiting on an answer, within `scope` (a condition on
+ * the question's course).
  *
  * A question qualifies when it is top-level, not deleted, not written by staff,
- * and has no reply from the course's instructor or an admin. Pass null for
- * instructorId to span every course (admins); pass an id to scope to the
- * courses that instructor owns.
+ * and has no live reply from the course's instructor or an admin.
  */
-export function getUnansweredQuestions(
-  instructorId: number | null
-): QueuedQuestion[] {
-  const author = alias(users, "author");
-  const reply = alias(comments, "reply");
-  const replyAuthor = alias(users, "reply_author");
-
+function unansweredQuestionsQuery(scope?: SQL) {
   // Correlated: matches a live reply, by staff, to the outer question.
   const staffReply = db
     .select({ one: sql`1` })
@@ -298,19 +298,6 @@ export function getUnansweredQuestions(
         )
       )
     );
-
-  const conditions = [
-    isNull(comments.parentId),
-    isNull(comments.deletedAt),
-    // Staff asking their own question shouldn't queue up as work for themselves.
-    ne(author.role, UserRole.Admin),
-    ne(comments.userId, courses.instructorId),
-    notExists(staffReply),
-  ];
-
-  if (instructorId !== null) {
-    conditions.push(eq(courses.instructorId, instructorId));
-  }
 
   return db
     .select({
@@ -330,7 +317,42 @@ export function getUnansweredQuestions(
     .innerJoin(lessons, eq(comments.lessonId, lessons.id))
     .innerJoin(modules, eq(lessons.moduleId, modules.id))
     .innerJoin(courses, eq(modules.courseId, courses.id))
-    .where(and(...conditions))
+    .where(
+      and(
+        isNull(comments.parentId),
+        isNull(comments.deletedAt),
+        // Staff asking their own question shouldn't queue up as work for themselves.
+        ne(author.role, UserRole.Admin),
+        ne(comments.userId, courses.instructorId),
+        notExists(staffReply),
+        scope
+      )
+    );
+}
+
+/**
+ * Questions still waiting on an answer, newest first. Pass null for
+ * instructorId to span every course (admins); pass an id to scope to the
+ * courses that instructor owns.
+ */
+export function getUnansweredQuestions(
+  instructorId: number | null
+): QueuedQuestion[] {
+  return unansweredQuestionsQuery(
+    instructorId === null ? undefined : eq(courses.instructorId, instructorId)
+  )
     .orderBy(desc(comments.createdAt), desc(comments.id))
     .all();
+}
+
+/** How many questions on one course are still waiting on an answer. */
+export function countUnansweredQuestions(courseId: number): number {
+  const unanswered = unansweredQuestionsQuery(eq(courses.id, courseId)).as(
+    "unanswered"
+  );
+  const row = db
+    .select({ count: sql<number>`count(*)` })
+    .from(unanswered)
+    .get();
+  return row?.count ?? 0;
 }
