@@ -121,6 +121,17 @@ export function markEnrollmentComplete(userId: number, courseId: number) {
     .get();
 }
 
+export function clearEnrollmentCompletion(userId: number, courseId: number) {
+  return db
+    .update(enrollments)
+    .set({ completedAt: null })
+    .where(
+      and(eq(enrollments.userId, userId), eq(enrollments.courseId, courseId))
+    )
+    .returning()
+    .get();
+}
+
 export function getUserEnrolledCourses(userId: number) {
   return db
     .select({

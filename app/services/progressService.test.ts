@@ -24,6 +24,8 @@ import {
   isLessonCompleted,
   getNextIncompleteLesson,
 } from "./progressService";
+import { enrollUser, findEnrollment } from "./enrollmentService";
+import { createLesson } from "./lessonService";
 
 // Helper to create a module with lessons in the test db
 function createModuleWithLessons(
@@ -484,6 +486,141 @@ describe("progressService", () => {
       const next = getNextIncompleteLesson(base.user.id, base.course.id);
       expect(next).toBeDefined();
       expect(next!.id).toBe(lessons[0].id);
+    });
+  });
+
+  describe("course completion", () => {
+    it("sets the enrollment completedAt when the last remaining lesson is completed", () => {
+      const { lessons } = createModuleWithLessons(
+        base.course.id,
+        "Module 1",
+        1,
+        2
+      );
+      enrollUser(base.user.id, base.course.id, false, false);
+
+      markLessonComplete(base.user.id, lessons[0].id);
+      markLessonComplete(base.user.id, lessons[1].id);
+
+      const enrollment = findEnrollment(base.user.id, base.course.id);
+      expect(enrollment!.completedAt).not.toBeNull();
+    });
+
+    it("does not set completedAt when other lessons remain incomplete", () => {
+      const { lessons } = createModuleWithLessons(
+        base.course.id,
+        "Module 1",
+        1,
+        2
+      );
+      enrollUser(base.user.id, base.course.id, false, false);
+
+      markLessonComplete(base.user.id, lessons[0].id);
+
+      const enrollment = findEnrollment(base.user.id, base.course.id);
+      expect(enrollment!.completedAt).toBeNull();
+    });
+
+    it("does not overwrite an existing completedAt when a lesson is completed again", () => {
+      const { lessons } = createModuleWithLessons(
+        base.course.id,
+        "Module 1",
+        1,
+        1
+      );
+      enrollUser(base.user.id, base.course.id, false, false);
+
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+        markLessonComplete(base.user.id, lessons[0].id);
+
+        vi.setSystemTime(new Date("2026-03-01T00:00:00.000Z"));
+        markLessonComplete(base.user.id, lessons[0].id);
+      } finally {
+        vi.useRealTimers();
+      }
+
+      const enrollment = findEnrollment(base.user.id, base.course.id);
+      expect(enrollment!.completedAt).toBe("2026-01-01T00:00:00.000Z");
+    });
+
+    it("clears completedAt when a lesson in the course is reset", () => {
+      const { lessons } = createModuleWithLessons(
+        base.course.id,
+        "Module 1",
+        1,
+        2
+      );
+      enrollUser(base.user.id, base.course.id, false, false);
+      markLessonComplete(base.user.id, lessons[0].id);
+      markLessonComplete(base.user.id, lessons[1].id);
+
+      resetLessonProgress(base.user.id, lessons[0].id);
+
+      const enrollment = findEnrollment(base.user.id, base.course.id);
+      expect(enrollment!.completedAt).toBeNull();
+    });
+
+    it("keeps an existing completion when a new lesson is added to the course", () => {
+      const { module, lessons } = createModuleWithLessons(
+        base.course.id,
+        "Module 1",
+        1,
+        1
+      );
+      enrollUser(base.user.id, base.course.id, false, false);
+
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+        markLessonComplete(base.user.id, lessons[0].id);
+      } finally {
+        vi.useRealTimers();
+      }
+
+      createLesson(module.id, "New Lesson", null, null, null, null);
+
+      const enrollment = findEnrollment(base.user.id, base.course.id);
+      expect(enrollment!.completedAt).toBe("2026-01-01T00:00:00.000Z");
+    });
+
+    it("keeps completion when resetting a lesson the student never started", () => {
+      const { module, lessons } = createModuleWithLessons(
+        base.course.id,
+        "Module 1",
+        1,
+        1
+      );
+      enrollUser(base.user.id, base.course.id, false, false);
+      markLessonComplete(base.user.id, lessons[0].id);
+      const newLesson = createLesson(
+        module.id,
+        "New Lesson",
+        null,
+        null,
+        null,
+        null
+      );
+
+      resetLessonProgress(base.user.id, newLesson.id);
+
+      const enrollment = findEnrollment(base.user.id, base.course.id);
+      expect(enrollment!.completedAt).not.toBeNull();
+    });
+
+    it("does nothing to completion when the student is not enrolled", () => {
+      const { lessons } = createModuleWithLessons(
+        base.course.id,
+        "Module 1",
+        1,
+        1
+      );
+
+      markLessonComplete(base.user.id, lessons[0].id);
+
+      expect(findEnrollment(base.user.id, base.course.id)).toBeUndefined();
+      expect(isLessonCompleted(base.user.id, lessons[0].id)).toBe(true);
     });
   });
 });

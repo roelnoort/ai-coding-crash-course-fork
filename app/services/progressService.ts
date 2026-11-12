@@ -8,6 +8,11 @@ import {
   enrollments,
   LessonProgressStatus,
 } from "~/db/schema";
+import {
+  clearEnrollmentCompletion,
+  findEnrollment,
+  markEnrollmentComplete,
+} from "~/services/enrollmentService";
 
 // ─── Progress Service ───
 // Handles lesson completion tracking and course progress calculation.
@@ -56,6 +61,28 @@ export function getLessonProgressForCourse(userId: number, courseId: number) {
 }
 
 export function markLessonComplete(userId: number, lessonId: number) {
+  const progress = upsertCompletedProgress(userId, lessonId);
+
+  const courseId = getCourseIdForLesson(lessonId);
+  if (courseId !== undefined) {
+    recordCourseCompletionIfFinished(userId, courseId);
+  }
+
+  return progress;
+}
+
+function recordCourseCompletionIfFinished(userId: number, courseId: number) {
+  const enrollment = findEnrollment(userId, courseId);
+  if (!enrollment || enrollment.completedAt) return;
+
+  if (
+    getCompletedLessonCount(userId, courseId) === getTotalLessonCount(courseId)
+  ) {
+    markEnrollmentComplete(userId, courseId);
+  }
+}
+
+function upsertCompletedProgress(userId: number, lessonId: number) {
   const existing = getLessonProgress(userId, lessonId);
 
   if (existing) {
@@ -80,6 +107,15 @@ export function markLessonComplete(userId: number, lessonId: number) {
     })
     .returning()
     .get();
+}
+
+function getCourseIdForLesson(lessonId: number) {
+  return db
+    .select({ courseId: modules.courseId })
+    .from(lessons)
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .where(eq(lessons.id, lessonId))
+    .get()?.courseId;
 }
 
 export function markLessonInProgress(userId: number, lessonId: number) {
@@ -109,7 +145,7 @@ export function markLessonInProgress(userId: number, lessonId: number) {
 }
 
 export function resetLessonProgress(userId: number, lessonId: number) {
-  return db
+  const deleted = db
     .delete(lessonProgress)
     .where(
       and(
@@ -119,6 +155,15 @@ export function resetLessonProgress(userId: number, lessonId: number) {
     )
     .returning()
     .get();
+
+  if (deleted) {
+    const courseId = getCourseIdForLesson(lessonId);
+    if (courseId !== undefined) {
+      clearEnrollmentCompletion(userId, courseId);
+    }
+  }
+
+  return deleted;
 }
 
 function getCourseLessonIds(courseId: number): number[] {

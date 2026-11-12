@@ -1394,7 +1394,7 @@ You've completed the Building REST APIs course. You now have the skills to build
         userId: students[1].id,
         courseId: course1.id,
         enrolledAt: daysAgo(45),
-        completedAt: daysAgo(10),
+        completedAt: daysAgo(27), // matches his last lesson completion below
       },
       { userId: students[2].id, courseId: course1.id, enrolledAt: daysAgo(35) },
       { userId: students[2].id, courseId: course2.id, enrolledAt: daysAgo(30) },
@@ -1656,6 +1656,137 @@ You've completed the Building REST APIs course. You now have the skills to build
 
   console.log("Created lesson progress records.");
 
+  // ─── Past Cohorts ───
+  // Students who enrolled over the last 12 months. Most finished every lesson,
+  // so completions (enrollments.completedAt) land in several different months
+  // for the analytics trend charts. Two abandoned part-way.
+  // completedAt always equals the student's last lesson completion.
+
+  const pastCohorts = [
+    {
+      name: "Noah Bennett",
+      course: course1,
+      enrolledDaysAgo: 350,
+      lastLessonDaysAgo: 320,
+      lessonsDone: "all",
+      country: "US",
+    },
+    {
+      name: "Ava Robinson",
+      course: course2,
+      enrolledDaysAgo: 310,
+      lastLessonDaysAgo: 275,
+      lessonsDone: "all",
+      country: "GB",
+    },
+    {
+      name: "Lucas Ferreira",
+      course: course1,
+      enrolledDaysAgo: 280,
+      lastLessonDaysAgo: 255,
+      lessonsDone: 6,
+      country: "BR",
+    },
+    {
+      name: "Mia Schneider",
+      course: course1,
+      enrolledDaysAgo: 260,
+      lastLessonDaysAgo: 215,
+      lessonsDone: "all",
+      country: "DE",
+    },
+    {
+      name: "Ethan Clarke",
+      course: course2,
+      enrolledDaysAgo: 200,
+      lastLessonDaysAgo: 160,
+      lessonsDone: "all",
+      country: "US",
+    },
+    {
+      name: "Isabella Rossi",
+      course: course2,
+      enrolledDaysAgo: 170,
+      lastLessonDaysAgo: 150,
+      lessonsDone: 4,
+      country: "IT",
+    },
+    {
+      name: "Arjun Mehta",
+      course: course1,
+      enrolledDaysAgo: 150,
+      lastLessonDaysAgo: 100,
+      lessonsDone: "all",
+      country: "IN",
+    },
+    {
+      name: "Chloe Dubois",
+      course: course2,
+      enrolledDaysAgo: 110,
+      lastLessonDaysAgo: 70,
+      lessonsDone: "all",
+      country: "FR",
+    },
+  ] as const;
+
+  const pppPriceFactor: Record<string, number> = { IN: 0.5, BR: 0.6 };
+
+  for (const cohort of pastCohorts) {
+    const [student] = db
+      .insert(schema.users)
+      .values({
+        name: cohort.name,
+        email: `${slugify(cohort.name).replace(/-/g, ".")}@student.dev`,
+        role: UserRole.Student,
+        avatarUrl: `https://api.dicebear.com/9.x/avataaars/svg?seed=${slugify(cohort.name)}`,
+        createdAt: daysAgo(cohort.enrolledDaysAgo + 5),
+      })
+      .returning()
+      .all();
+
+    const lessonIds =
+      cohort.course.id === course1.id ? course1LessonIds : course2LessonIds;
+    const finished = cohort.lessonsDone === "all";
+    const lessonCount = finished ? lessonIds.length : cohort.lessonsDone;
+
+    // Spread lesson completions evenly between enrolment and the last lesson.
+    const { lastLessonDaysAgo } = cohort;
+    const span = cohort.enrolledDaysAgo - lastLessonDaysAgo;
+    for (let i = 0; i < lessonCount; i++) {
+      const completedDaysAgo =
+        cohort.enrolledDaysAgo - Math.round((span * (i + 1)) / lessonCount);
+      markComplete(student.id, lessonIds[i], completedDaysAgo);
+    }
+
+    db.insert(schema.enrollments)
+      .values({
+        userId: student.id,
+        courseId: cohort.course.id,
+        enrolledAt: daysAgo(cohort.enrolledDaysAgo),
+        completedAt: finished ? daysAgo(lastLessonDaysAgo) : null,
+      })
+      .run();
+
+    db.insert(schema.purchases)
+      .values({
+        userId: student.id,
+        courseId: cohort.course.id,
+        amountPaid: Math.round(
+          cohort.course.price * (pppPriceFactor[cohort.country] ?? 1)
+        ),
+        country: cohort.country,
+        createdAt: daysAgo(cohort.enrolledDaysAgo),
+      })
+      .run();
+  }
+
+  const pastCohortCompletions = pastCohorts.filter(
+    (c) => c.lessonsDone === "all"
+  ).length;
+  console.log(
+    `Created ${pastCohorts.length} past-cohort students with enrollments and purchases (${pastCohortCompletions} completed).`
+  );
+
   // ─── Quiz Attempts ───
 
   // Helper to record a quiz attempt with answers
@@ -1914,16 +2045,22 @@ You've completed the Building REST APIs course. You now have the skills to build
   );
 
   console.log("\n✓ Seed complete!");
-  console.log("  Users: 9 (1 admin, 2 instructors, 6 students)");
+  console.log(
+    `  Users: ${9 + pastCohorts.length} (1 admin, 2 instructors, ${6 + pastCohorts.length} students)`
+  );
   console.log("  Categories: 5");
   console.log(
     `  Courses: 2 (${course1LessonIds.length} + ${course2LessonIds.length} lessons)`
   );
   console.log("  Quizzes: 3");
-  console.log("  Enrollments: 7");
+  console.log(
+    `  Enrollments: ${7 + pastCohorts.length} (${1 + pastCohortCompletions} completed)`
+  );
   console.log("  Course ratings: 6");
   console.log("  Lesson comments: 15 (4 questions awaiting an answer)");
-  console.log("  Purchases: 6 (5 individual + 1 team)");
+  console.log(
+    `  Purchases: ${6 + pastCohorts.length} (${5 + pastCohorts.length} individual + 1 team)`
+  );
   console.log("  Teams: 1 (with 5 coupons)");
 }
 
