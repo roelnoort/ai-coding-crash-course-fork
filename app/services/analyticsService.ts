@@ -1,4 +1,15 @@
-import { and, eq, isNotNull, ne, or, sql } from "drizzle-orm";
+import {
+  and,
+  eq,
+  gte,
+  inArray,
+  isNotNull,
+  ne,
+  or,
+  sql,
+  type SQL,
+} from "drizzle-orm";
+import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 import { db } from "~/db";
 import {
   CourseStatus,
@@ -50,9 +61,23 @@ export type CourseOverviewRow = OverviewMetrics & {
   status: CourseStatus;
 };
 
+/** One calendar month (UTC) of activity. */
+export type MonthlyBucket = {
+  /** "YYYY-MM", in UTC. */
+  month: string;
+  /** Integer cents, bucketed by purchase date. */
+  revenueCents: number;
+  /** Bucketed by enrollment date. */
+  enrollments: number;
+  /** Bucketed by enrollments.completedAt. */
+  completions: number;
+};
+
 export type InstructorOverview = {
   courses: CourseOverviewRow[];
   total: OverviewMetrics;
+  /** The 12 calendar months up to and including the current one, oldest first. */
+  trends: MonthlyBucket[];
 };
 
 /** The sums and counts every overview metric is derived from. */
@@ -112,9 +137,7 @@ function enrollmentStats() {
     .select({
       courseId: enrollments.courseId,
       students: sql<number>`count(*)`.as("students"),
-      completed: sql<number>`count(${enrollments.completedAt})`.as(
-        "completed"
-      ),
+      completed: sql<number>`count(${enrollments.completedAt})`.as("completed"),
     })
     .from(enrollments)
     .groupBy(enrollments.courseId)
@@ -218,18 +241,99 @@ function ratingStats() {
     .as("rating_stats");
 }
 
-// ─── Public API ───
+// ─── Monthly trends ───
+
+const TREND_MONTHS = 12;
+
+/** The 12 "YYYY-MM" UTC month keys ending in `now`'s month, oldest first. */
+function trendMonths(now: Date): string[] {
+  return Array.from({ length: TREND_MONTHS }, (_, i) => {
+    const offset = TREND_MONTHS - 1 - i;
+    const d = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - offset, 1)
+    );
+    return d.toISOString().slice(0, 7);
+  });
+}
+
+/** "YYYY-MM" of an ISO timestamp column, converted to UTC. */
+function utcMonth(column: SQLiteColumn) {
+  return sql<string>`strftime('%Y-%m', ${column})`;
+}
 
 /**
- * One row per course the instructor owns — published and archived always,
- * drafts only once someone has enrolled — plus a total row across them.
- *
- * `now` is unused for now — it will anchor the 12-month trends window (#5).
+ * Revenue, new enrollments and completions per UTC month for the given
+ * courses, for the 12 months ending in `now`'s month. Empty months are zero.
  */
-export function getInstructorOverview(
-  instructorId: number,
-  now: Date
-): InstructorOverview {
+function monthlyTrends(courseIds: number[], now: Date): MonthlyBucket[] {
+  const months = trendMonths(now);
+  const buckets = new Map<string, MonthlyBucket>(
+    months.map((month) => [
+      month,
+      { month, revenueCents: 0, enrollments: 0, completions: 0 },
+    ])
+  );
+  if (courseIds.length === 0) return [...buckets.values()];
+
+  const firstMonth = months[0];
+  const revenueMonth = utcMonth(purchases.createdAt);
+  const revenue = db
+    .select({
+      month: revenueMonth,
+      value: sql<number>`sum(${purchases.amountPaid})`,
+    })
+    .from(purchases)
+    .where(
+      and(inArray(purchases.courseId, courseIds), gte(revenueMonth, firstMonth))
+    )
+    .groupBy(revenueMonth)
+    .all();
+
+  const countByMonth = (column: SQLiteColumn) => {
+    const month = utcMonth(column);
+    return db
+      .select({ month, value: sql<number>`count(*)` })
+      .from(enrollments)
+      .where(
+        and(inArray(enrollments.courseId, courseIds), gte(month, firstMonth))
+      )
+      .groupBy(month)
+      .all();
+  };
+
+  const fill = (
+    field: Exclude<keyof MonthlyBucket, "month">,
+    rows: { month: string; value: number }[]
+  ) => {
+    for (const row of rows) {
+      const bucket = buckets.get(row.month);
+      if (bucket) bucket[field] = row.value;
+    }
+  };
+
+  fill("revenueCents", revenue);
+  fill("enrollments", countByMonth(enrollments.enrolledAt));
+  // strftime of a null completedAt is null, which the month filter drops.
+  fill("completions", countByMonth(enrollments.completedAt));
+
+  return [...buckets.values()];
+}
+
+// ─── Per-course metric rows ───
+
+type CourseTotalsRow = MetricTotals & {
+  courseId: number;
+  title: string;
+  status: CourseStatus;
+};
+
+/**
+ * Every course's metric totals, filtered by `where` — which may refer to the
+ * enrollment aggregate, e.g. to keep drafts only once someone is enrolled.
+ */
+function courseTotals(
+  where: (enrollmentAgg: ReturnType<typeof enrollmentStats>) => SQL | undefined
+): CourseTotalsRow[] {
   const enrollmentAgg = enrollmentStats();
   const revenueAgg = revenueStats();
   const lessonAgg = lessonCounts();
@@ -237,7 +341,7 @@ export function getInstructorOverview(
   const quizAgg = quizScoreStats();
   const ratingAgg = ratingStats();
 
-  const rows = db
+  return db
     .select({
       courseId: courses.id,
       title: courses.title,
@@ -261,18 +365,33 @@ export function getInstructorOverview(
     .leftJoin(progressAgg, eq(progressAgg.courseId, courses.id))
     .leftJoin(quizAgg, eq(quizAgg.courseId, courses.id))
     .leftJoin(ratingAgg, eq(ratingAgg.courseId, courses.id))
-    .where(
-      and(
-        eq(courses.instructorId, instructorId),
-        // Published and archived always; drafts only once someone is enrolled.
-        or(
-          ne(courses.status, CourseStatus.Draft),
-          isNotNull(enrollmentAgg.courseId)
-        )
-      )
-    )
+    .where(where(enrollmentAgg))
     .orderBy(courses.title)
     .all();
+}
+
+// ─── Public API ───
+
+/**
+ * One row per course the instructor owns — published and archived always,
+ * drafts only once someone has enrolled — plus a total row across them.
+ * Also returns monthly trends across those courses, for the 12 months ending
+ * in `now`'s month.
+ */
+export function getInstructorOverview(
+  instructorId: number,
+  now: Date
+): InstructorOverview {
+  const rows = courseTotals((enrollmentAgg) =>
+    and(
+      eq(courses.instructorId, instructorId),
+      // Published and archived always; drafts only once someone is enrolled.
+      or(
+        ne(courses.status, CourseStatus.Draft),
+        isNotNull(enrollmentAgg.courseId)
+      )
+    )
+  );
 
   return {
     courses: rows.map((row) => ({
@@ -282,5 +401,32 @@ export function getInstructorOverview(
       ...toMetrics(row),
     })),
     total: toMetrics(sumTotals(rows)),
+    trends: monthlyTrends(
+      rows.map((row) => row.courseId),
+      now
+    ),
+  };
+}
+
+export type CourseAnalytics = {
+  headline: OverviewMetrics;
+  /** The 12 calendar months up to and including the current one, oldest first. */
+  trends: MonthlyBucket[];
+};
+
+/**
+ * Headline numbers and monthly trends for one course, for the 12 months ending
+ * in `now`'s month. Doesn't check the course exists — that's the caller's job.
+ */
+export function getCourseAnalytics(
+  courseId: number,
+  now: Date
+): CourseAnalytics {
+  const [row] = courseTotals(() => eq(courses.id, courseId));
+
+  return {
+    // An unknown course has no rows — report it as empty.
+    headline: toMetrics(row ?? sumTotals([])),
+    trends: monthlyTrends([courseId], now),
   };
 }

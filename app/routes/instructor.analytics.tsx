@@ -5,7 +5,12 @@ import {
   getInstructorOverview,
   type OverviewMetrics,
 } from "~/services/analyticsService";
-import { formatPrice } from "~/lib/utils";
+import {
+  formatPercent,
+  formatRating,
+  formatRevenue,
+} from "~/lib/analytics-format";
+import { TrendCharts } from "~/components/analytics/trend-charts";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent } from "~/components/ui/card";
 import { Skeleton } from "~/components/ui/skeleton";
@@ -13,7 +18,9 @@ import { AlertTriangle, BarChart3 } from "lucide-react";
 import { CourseStatus } from "~/db/schema";
 
 // ─── Instructor Analytics Overview ───
-// One row per course with its key metrics, and a total row across them.
+// One row per course with its key metrics, a total row across them, and
+// monthly trend charts across the same courses. Each row links to the course's
+// own analytics page.
 // Instructors only — admins get 403 (analytics is out of scope for them).
 
 export function meta() {
@@ -26,21 +33,6 @@ export function meta() {
 export async function loader({ request }: Route.LoaderArgs) {
   const { userId } = await requireInstructor(request);
   return getInstructorOverview(userId, new Date());
-}
-
-const NO_DATA = "—";
-
-function formatPercent(value: number | null) {
-  return value === null ? NO_DATA : `${Math.round(value * 100)}%`;
-}
-
-function formatRating(value: number | null) {
-  return value === null ? NO_DATA : value.toFixed(1);
-}
-
-function formatRevenue(cents: number) {
-  // formatPrice renders 0 as "Free", which reads wrong for earnings.
-  return cents === 0 ? "$0.00" : formatPrice(cents);
 }
 
 function MetricCells({ metrics }: { metrics: OverviewMetrics }) {
@@ -84,7 +76,7 @@ export function HydrateFallback() {
 export default function InstructorAnalytics({
   loaderData,
 }: Route.ComponentProps) {
-  const { courses, total } = loaderData;
+  const { courses, total, trends } = loaderData;
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -145,7 +137,12 @@ export default function InstructorAnalytics({
                     className="border-b last:border-b-0"
                   >
                     <td className="px-4 py-3">
-                      <div className="font-medium">{course.title}</div>
+                      <Link
+                        to={`/instructor/${course.courseId}/analytics`}
+                        className="font-medium hover:underline"
+                      >
+                        {course.title}
+                      </Link>
                       {course.status !== CourseStatus.Published && (
                         <div className="text-xs text-muted-foreground">
                           {statusLabel[course.status]}
@@ -159,6 +156,13 @@ export default function InstructorAnalytics({
             </table>
           </CardContent>
         </Card>
+      )}
+
+      {courses.length > 0 && (
+        <section className="mt-8">
+          <h2 className="mb-4 text-xl font-semibold">Last 12 months</h2>
+          <TrendCharts trends={trends} />
+        </section>
       )}
     </div>
   );

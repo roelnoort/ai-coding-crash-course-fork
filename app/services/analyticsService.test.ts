@@ -12,7 +12,7 @@ vi.mock("~/db", () => ({
 }));
 
 // Import after mock so the module picks up our test db
-import { getInstructorOverview } from "./analyticsService";
+import { getCourseAnalytics, getInstructorOverview } from "./analyticsService";
 import { createPurchase, createTeamPurchase } from "./purchaseService";
 import { redeemCoupon } from "./couponService";
 
@@ -106,6 +106,30 @@ function attemptQuiz(userId: number, quizId: number, score: number) {
   testDb
     .insert(schema.quizAttempts)
     .values({ userId, quizId, score, passed: score >= 0.7 })
+    .run();
+}
+
+function purchaseAt(courseId: number, amountPaid: number, createdAt: string) {
+  testDb
+    .insert(schema.purchases)
+    .values({
+      userId: createStudent().id,
+      courseId,
+      amountPaid,
+      country: "US",
+      createdAt,
+    })
+    .run();
+}
+
+function enrollAt(
+  courseId: number,
+  enrolledAt: string,
+  completedAt: string | null = null
+) {
+  testDb
+    .insert(schema.enrollments)
+    .values({ userId: createStudent().id, courseId, enrolledAt, completedAt })
     .run();
 }
 
@@ -315,7 +339,9 @@ describe("analyticsService", () => {
         .returning()
         .get();
 
-      expect(getInstructorOverview(newInstructor.id, NOW)).toEqual({
+      const { courses, total } = getInstructorOverview(newInstructor.id, NOW);
+
+      expect({ courses, total }).toEqual({
         courses: [],
         total: {
           students: 0,
@@ -400,6 +426,216 @@ describe("analyticsService", () => {
       const overview = getInstructorOverview(base.instructor.id, NOW);
 
       expect(overview.courses.map((c) => c.courseId)).toEqual([base.course.id]);
+    });
+  });
+});
+
+describe("monthly trends", () => {
+  beforeEach(() => {
+    testDb = createTestDb();
+    base = seedBaseData(testDb);
+  });
+
+  function trends() {
+    return getInstructorOverview(base.instructor.id, NOW).trends;
+  }
+
+  it("covers exactly the 12 calendar months ending in the current month, zero-filled", () => {
+    expect(trends().map((b) => b.month)).toEqual([
+      "2025-07",
+      "2025-08",
+      "2025-09",
+      "2025-10",
+      "2025-11",
+      "2025-12",
+      "2026-01",
+      "2026-02",
+      "2026-03",
+      "2026-04",
+      "2026-05",
+      "2026-06",
+    ]);
+    for (const bucket of trends()) {
+      expect(bucket).toMatchObject({
+        revenueCents: 0,
+        enrollments: 0,
+        completions: 0,
+      });
+    }
+  });
+
+  function bucket(month: string) {
+    const found = trends().find((b) => b.month === month);
+    if (!found) throw new Error(`No bucket for ${month}`);
+    return found;
+  }
+
+  it("buckets revenue by the UTC month it was paid in", () => {
+    purchaseAt(base.course.id, 1000, "2026-06-01T00:00:00.000Z");
+    purchaseAt(base.course.id, 2000, "2026-05-31T23:59:59.999Z");
+    purchaseAt(base.course.id, 500, "2026-05-02T10:00:00.000Z");
+    purchaseAt(base.course.id, 300, "2025-07-01T00:00:00.000Z");
+    // Before the window: June last year.
+    purchaseAt(base.course.id, 9999, "2025-06-30T23:59:59.999Z");
+
+    expect(bucket("2026-06").revenueCents).toBe(1000);
+    expect(bucket("2026-05").revenueCents).toBe(2500);
+    expect(bucket("2025-07").revenueCents).toBe(300);
+    expect(trends().reduce((sum, b) => sum + b.revenueCents, 0)).toBe(3800);
+  });
+
+  it("buckets new enrollments by the UTC month they enrolled in", () => {
+    enrollAt(base.course.id, "2026-06-01T00:00:00.000Z");
+    enrollAt(base.course.id, "2026-06-14T08:00:00.000Z");
+    enrollAt(base.course.id, "2026-05-31T23:59:59.999Z");
+    enrollAt(base.course.id, "2025-06-30T23:59:59.999Z");
+
+    expect(bucket("2026-06").enrollments).toBe(2);
+    expect(bucket("2026-05").enrollments).toBe(1);
+    expect(trends().reduce((sum, b) => sum + b.enrollments, 0)).toBe(3);
+  });
+
+  it("buckets completions by the UTC month the enrollment was completed in", () => {
+    // Enrolled before the window, completed inside it.
+    enrollAt(
+      base.course.id,
+      "2025-01-10T00:00:00.000Z",
+      "2025-08-01T00:00:00.000Z"
+    );
+    enrollAt(
+      base.course.id,
+      "2026-03-01T00:00:00.000Z",
+      "2026-04-30T23:59:59.999Z"
+    );
+    enrollAt(
+      base.course.id,
+      "2026-03-01T00:00:00.000Z",
+      "2026-05-01T00:00:00.000Z"
+    );
+    enrollAt(base.course.id, "2026-03-01T00:00:00.000Z");
+
+    expect(bucket("2025-08").completions).toBe(1);
+    expect(bucket("2026-04").completions).toBe(1);
+    expect(bucket("2026-05").completions).toBe(1);
+    expect(bucket("2026-03").completions).toBe(0);
+    expect(trends().reduce((sum, b) => sum + b.completions, 0)).toBe(3);
+  });
+
+  it("adds up the instructor's included courses only", () => {
+    const second = createCourse(base.instructor.id, "second");
+    const emptyDraft = createCourse(
+      base.instructor.id,
+      "empty-draft",
+      schema.CourseStatus.Draft
+    );
+    const otherInstructor = testDb
+      .insert(schema.users)
+      .values({
+        name: "Other Instructor",
+        email: "other-instructor@example.com",
+        role: schema.UserRole.Instructor,
+      })
+      .returning()
+      .get();
+    const theirs = createCourse(otherInstructor.id, "theirs");
+
+    for (const courseId of [base.course.id, second.id, theirs.id]) {
+      enrollAt(
+        courseId,
+        "2026-06-02T00:00:00.000Z",
+        "2026-06-10T00:00:00.000Z"
+      );
+      purchaseAt(courseId, 1000, "2026-06-02T00:00:00.000Z");
+    }
+    // A draft nobody is enrolled in isn't included, even if a purchase exists.
+    purchaseAt(emptyDraft.id, 5000, "2026-06-03T00:00:00.000Z");
+
+    expect(bucket("2026-06")).toEqual({
+      month: "2026-06",
+      revenueCents: 2000,
+      enrollments: 2,
+      completions: 2,
+    });
+  });
+});
+
+describe("getCourseAnalytics", () => {
+  beforeEach(() => {
+    testDb = createTestDb();
+    base = seedBaseData(testDb);
+  });
+
+  it("reports the course's headline numbers", () => {
+    const lessons = createLessons(createModule(base.course.id).id, 2);
+    const quiz = createQuiz(lessons[0].id);
+    const idle = createStudent();
+    enroll(base.user.id, base.course.id, "2026-05-01T00:00:00Z");
+    enroll(idle.id, base.course.id);
+    for (const lesson of lessons) completeLesson(base.user.id, lesson.id);
+    attemptQuiz(base.user.id, quiz.id, 0.5);
+    attemptQuiz(base.user.id, quiz.id, 0.9);
+    createPurchase(base.user.id, base.course.id, 4000, "US");
+    createPurchase(idle.id, base.course.id, 2000, "IN");
+    for (const [userId, rating] of [
+      [base.user.id, 5],
+      [idle.id, 4],
+    ]) {
+      testDb
+        .insert(schema.courseRatings)
+        .values({ userId, courseId: base.course.id, rating })
+        .run();
+    }
+
+    // Another course of the same instructor must not leak in.
+    const other = createCourse(base.instructor.id, "other");
+    enroll(createStudent().id, other.id);
+    createPurchase(base.user.id, other.id, 7777, "US");
+
+    const { headline } = getCourseAnalytics(base.course.id, NOW);
+
+    expect(headline.students).toBe(2);
+    expect(headline.revenueCents).toBe(6000);
+    expect(headline.completionRate).toBe(0.5);
+    expect(headline.averageProgress).toBe(0.5);
+    expect(headline.averageQuizScore).toBeCloseTo(0.9);
+    expect(headline.averageRating).toBeCloseTo(4.5);
+  });
+
+  it("reports no-data averages as null for a course without students", () => {
+    expect(getCourseAnalytics(base.course.id, NOW).headline).toEqual({
+      students: 0,
+      revenueCents: 0,
+      completionRate: null,
+      averageProgress: null,
+      averageQuizScore: null,
+      averageRating: null,
+    });
+  });
+
+  it("reports monthly trends for that course only", () => {
+    const other = createCourse(base.instructor.id, "other");
+    for (const courseId of [base.course.id, other.id]) {
+      enrollAt(
+        courseId,
+        "2026-04-10T00:00:00.000Z",
+        "2026-05-20T00:00:00.000Z"
+      );
+      purchaseAt(courseId, 1500, "2026-04-10T00:00:00.000Z");
+    }
+
+    const { trends } = getCourseAnalytics(base.course.id, NOW);
+
+    expect(trends).toHaveLength(12);
+    expect(trends.at(-1)?.month).toBe("2026-06");
+    expect(trends.find((b) => b.month === "2026-04")).toMatchObject({
+      revenueCents: 1500,
+      enrollments: 1,
+      completions: 0,
+    });
+    expect(trends.find((b) => b.month === "2026-05")).toMatchObject({
+      revenueCents: 0,
+      enrollments: 0,
+      completions: 1,
     });
   });
 });

@@ -1657,9 +1657,10 @@ You've completed the Building REST APIs course. You now have the skills to build
   console.log("Created lesson progress records.");
 
   // ─── Past Cohorts ───
-  // Students who enrolled over the last 12 months. Most finished every lesson,
-  // so completions (enrollments.completedAt) land in several different months
-  // for the analytics trend charts. Two abandoned part-way.
+  // Students who enrolled over the last 12 months — purchases and enrollments
+  // spread across most months, so the analytics trend charts have data. Most
+  // finished every lesson, so completions (enrollments.completedAt) land in
+  // several different months. A few abandoned part-way or are just starting.
   // completedAt always equals the student's last lesson completion.
 
   const pastCohorts = [
@@ -1726,6 +1727,38 @@ You've completed the Building REST APIs course. You now have the skills to build
       lastLessonDaysAgo: 70,
       lessonsDone: "all",
       country: "FR",
+    },
+    {
+      name: "Oliver Hughes",
+      course: course2,
+      enrolledDaysAgo: 335,
+      lastLessonDaysAgo: 290,
+      lessonsDone: "all",
+      country: "GB",
+    },
+    {
+      name: "Sofia Martinez",
+      course: course1,
+      enrolledDaysAgo: 235,
+      lastLessonDaysAgo: 185,
+      lessonsDone: "all",
+      country: "BR",
+    },
+    {
+      name: "Hiroshi Tanaka",
+      course: course1,
+      enrolledDaysAgo: 85,
+      lastLessonDaysAgo: 40,
+      lessonsDone: "all",
+      country: "US",
+    },
+    {
+      name: "Priya Nair",
+      course: course2,
+      enrolledDaysAgo: 8,
+      lastLessonDaysAgo: 3,
+      lessonsDone: 2,
+      country: "IN",
     },
   ] as const;
 

@@ -181,3 +181,33 @@ export async function requireInstructor(request: Request) {
 
   return { userId, user };
 }
+
+/**
+ * Throws unless the user is the instructor who owns the course: 401 when
+ * signed out, 400 for an invalid id, 404 for an unknown course, 403 for anyone
+ * else — admins included. For instructor-only per-course pages such as analytics.
+ */
+export async function requireOwningInstructor(
+  request: Request,
+  rawCourseId: string
+) {
+  const userId = await requireUserId(request);
+
+  const courseId = Number(rawCourseId);
+  if (!Number.isInteger(courseId) || courseId <= 0) {
+    throw data("Invalid course ID.", { status: 400 });
+  }
+
+  const course = getCourseById(courseId);
+  if (!course) {
+    throw data("Course not found.", { status: 404 });
+  }
+
+  if (course.instructorId !== userId) {
+    throw data("Only this course's instructor can view that.", {
+      status: 403,
+    });
+  }
+
+  return { userId, course };
+}
